@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # File Upload Configuration
     max_file_size: int = 10 * 1024 * 1024  # 10MB
     allowed_file_types: list = [".pdf", ".docx", ".txt"]
-    upload_folder: str = "uploads"
+    upload_folder: str = "../uploads"
     
     # CORS Configuration
     cors_origins: list = ["*"]
