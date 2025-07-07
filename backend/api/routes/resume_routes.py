@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from backend.models.schemas import (
     UploadResumeResponse,
@@ -23,6 +24,9 @@ def get_ai_service() -> AIServiceInterface:
 
 def get_file_service() -> FileService:
     return create_file_service()
+
+def get_document_service():
+    return create_document_service()
 
 @router.post("/upload-resume", response_model=UploadResumeResponse)
 async def upload_resume(
@@ -63,22 +67,24 @@ async def upload_resume(
             else:
                 raise HTTPException(status_code=400, detail="Unsupported file type")
             
+            # Use document service for saving (will convert PDFs to TXT)
+            document_service = create_document_service()
+            
             # Validate file
-            file_service.validate_file(file_content, file.filename, file_type)
+            document_service.validate_file(file_content, file.filename, file_type)
             
-            # Save file
-            file_id, file_size = await file_service.save_file(file_content, file.filename, file_type)
-            filename = file.filename
+            # Save file (PDFs will be converted to TXT automatically)
+            file_id, file_size = await document_service.save_file(file_content, file.filename, file_type)
             
-            # Test document extraction with enhanced service
-            try:
-                document_service = create_document_service()
-                extraction_result = document_service.extract_text_with_metadata(file_content, file_type)
-                print(f"Upload: Document extraction method: {extraction_result['metadata']['extraction_method']}")
-                if extraction_result['metadata']['extraction_method'] == 'docling':
-                    print(f"Upload: Docling extracted {extraction_result['metadata']['pages']} pages with {extraction_result['metadata']['elements']} elements")
-            except Exception as e:
-                print(f"Upload: Document extraction test failed: {e}")
+            # Update filename if PDF was converted to TXT
+            if file_type == FileType.PDF:
+                filename = f"{Path(file.filename).stem}.txt"
+            else:
+                filename = file.filename
+            
+            print(f"Upload: File saved with ID: {file_id}, size: {file_size}")
+            if file_type == FileType.PDF:
+                print(f"Upload: PDF converted to TXT format")
             
         elif resume_text:
             # Handle text input
@@ -90,8 +96,9 @@ async def upload_resume(
             file_type = FileType.TXT
             filename = f"resume_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
             
-            # Save text as file
-            file_id, file_size = await file_service.save_file(file_content, filename, file_type)
+            # Save text as file using document service
+            document_service = create_document_service()
+            file_id, file_size = await document_service.save_file(file_content, filename, file_type)
             
         else:
             raise HTTPException(status_code=400, detail="Either file or resume_text must be provided")
@@ -138,20 +145,14 @@ async def analyze_job(
         resume_text = request.resume_text
         
         if not resume_text and request.file_id:
-            # Extract text from uploaded file using enhanced document service
-            file_data = await file_service.get_file_by_id(request.file_id)
-            if not file_data:
-                raise HTTPException(status_code=404, detail="File not found")
-            
-            file_content, filename, file_type = file_data
-            
-            # Use enhanced document service with metadata
+            # Get text content from uploaded file using document service
             document_service = create_document_service()
-            extraction_result = document_service.extract_text_with_metadata(file_content, file_type)
-            resume_text = extraction_result["text"]
+            resume_text = await document_service.get_text_content(request.file_id)
             
-            # Log extraction method for debugging
-            print(f"Document extraction method: {extraction_result['metadata']['extraction_method']}")
+            if not resume_text:
+                raise HTTPException(status_code=404, detail="File not found or could not extract text")
+            
+            print(f"Analysis: Retrieved text content from file {request.file_id}")
         
         if not resume_text:
             raise HTTPException(status_code=400, detail="No resume content available")
@@ -269,4 +270,101 @@ async def generate_resume(
 @router.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.utcnow()} 
+    return {"status": "healthy", "timestamp": datetime.utcnow()}
+
+@router.get("/get-pdf/{file_id}")
+async def get_pdf_file(
+    file_id: str,
+    document_service = Depends(get_document_service)
+):
+    """
+    Get the original PDF file by file ID
+    
+    - **file_id**: The ID of the uploaded file
+    
+    Returns the PDF file content
+    """
+    try:
+        # Get PDF file
+        pdf_data = await document_service.get_pdf_file(file_id)
+        
+        if pdf_data is None:
+            raise HTTPException(status_code=404, detail="PDF file not found")
+        
+        file_content, filename = pdf_data
+        
+        return {
+            "success": True,
+            "file_id": file_id,
+            "filename": filename,
+            "file_size": len(file_content),
+            "content": file_content  # Note: This will be base64 encoded in JSON response
+        }
+        
+    except CustomException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get PDF file: {str(e)}")
+
+@router.get("/get-txt/{file_id}")
+async def get_txt_file(
+    file_id: str,
+    document_service = Depends(get_document_service)
+):
+    """
+    Get the extracted TXT file by file ID
+    
+    - **file_id**: The ID of the uploaded file
+    
+    Returns the TXT file content
+    """
+    try:
+        # Get TXT file
+        txt_data = await document_service.get_txt_file(file_id)
+        
+        if txt_data is None:
+            raise HTTPException(status_code=404, detail="TXT file not found")
+        
+        text_content, filename = txt_data
+        
+        return {
+            "success": True,
+            "file_id": file_id,
+            "filename": filename,
+            "content": text_content,
+            "content_length": len(text_content)
+        }
+        
+    except CustomException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get TXT file: {str(e)}")
+
+@router.get("/file-info/{file_id}")
+async def get_file_info(
+    file_id: str,
+    document_service = Depends(get_document_service)
+):
+    """
+    Get information about both PDF and TXT files by file ID
+    
+    - **file_id**: The ID of the uploaded file
+    
+    Returns information about both files
+    """
+    try:
+        # Get file information
+        file_info = document_service.get_file_info_both(file_id)
+        
+        if file_info is None:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return {
+            "success": True,
+            "file_info": file_info
+        }
+        
+    except CustomException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get file info: {str(e)}") 

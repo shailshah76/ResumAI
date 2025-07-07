@@ -69,21 +69,46 @@ class DocumentService:
             )
     
     async def save_file(self, file_content: bytes, filename: str, file_type: FileType) -> Tuple[str, int]:
-        """Save uploaded file and return file ID and size"""
+        """Save uploaded file and return file ID and size. For PDFs, save both PDF and extracted TXT."""
         try:
             # Generate unique file ID
             file_id = str(uuid.uuid4())
             
-            # Create filename with ID
-            safe_filename = f"{file_id}_{filename}"
-            file_path = self.upload_folder / safe_filename
+            # For PDF files, save both PDF and extracted TXT
+            if file_type == FileType.PDF:
+                # Save original PDF
+                pdf_filename = f"{file_id}_{filename}"
+                pdf_file_path = self.upload_folder / pdf_filename
+                async with aiofiles.open(pdf_file_path, 'wb') as f:
+                    await f.write(file_content)
+                
+                # Extract text from PDF
+                text_content = self.extract_text_from_file(file_content, file_type)
+                
+                # Create TXT filename
+                original_name = Path(filename).stem  # Remove .pdf extension
+                txt_filename = f"{file_id}_{original_name}.txt"
+                txt_file_path = self.upload_folder / txt_filename
+                
+                # Save as TXT file
+                async with aiofiles.open(txt_file_path, 'w', encoding='utf-8') as f:
+                    await f.write(text_content)
+                
+                # Return PDF file info (original file)
+                file_size = len(file_content)
+                return file_id, file_size
             
-            # Save file
-            async with aiofiles.open(file_path, 'wb') as f:
-                await f.write(file_content)
-            
-            file_size = len(file_content)
-            return file_id, file_size
+            else:
+                # For other file types, save as original
+                safe_filename = f"{file_id}_{filename}"
+                file_path = self.upload_folder / safe_filename
+                
+                # Save file
+                async with aiofiles.open(file_path, 'wb') as f:
+                    await f.write(file_content)
+                
+                file_size = len(file_content)
+                return file_id, file_size
             
         except Exception as e:
             raise FileUploadException(f"Failed to save file: {str(e)}")
@@ -106,18 +131,26 @@ class DocumentService:
         try:
             for file_path in self.upload_folder.iterdir():
                 if file_path.name.startswith(file_id):
-                    # Read file content
-                    async with aiofiles.open(file_path, 'rb') as f:
-                        file_content = await f.read()
-                    
                     # Determine file type from extension
                     file_extension = file_path.suffix.lower()
-                    if file_extension == '.pdf':
-                        file_type = FileType.PDF
-                    elif file_extension == '.docx':
-                        file_type = FileType.DOCX
-                    elif file_extension == '.txt':
+                    
+                    # Read file content based on type
+                    if file_extension == '.txt':
+                        # For TXT files, read as text and encode to bytes
+                        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                            text_content = await f.read()
+                        file_content = text_content.encode('utf-8')
                         file_type = FileType.TXT
+                    elif file_extension == '.docx':
+                        # For DOCX files, read as binary
+                        async with aiofiles.open(file_path, 'rb') as f:
+                            file_content = await f.read()
+                        file_type = FileType.DOCX
+                    elif file_extension == '.pdf':
+                        # For PDF files, read as binary (original PDFs)
+                        async with aiofiles.open(file_path, 'rb') as f:
+                            file_content = await f.read()
+                        file_type = FileType.PDF
                     else:
                         raise ValidationException(f"Unsupported file type: {file_extension}")
                     
@@ -310,6 +343,92 @@ class DocumentService:
                     "error": str(e)
                 }
             }
+
+    async def get_text_content(self, file_id: str) -> Optional[str]:
+        """Get text content from file by ID. For PDFs, returns the extracted text."""
+        try:
+            for file_path in self.upload_folder.iterdir():
+                if file_path.name.startswith(file_id):
+                    file_extension = file_path.suffix.lower()
+                    
+                    if file_extension == '.txt':
+                        # Read TXT file directly
+                        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                            return await f.read()
+                    elif file_extension == '.pdf':
+                        # For original PDFs, extract text
+                        async with aiofiles.open(file_path, 'rb') as f:
+                            file_content = await f.read()
+                        return self.extract_text_from_file(file_content, FileType.PDF)
+                    elif file_extension == '.docx':
+                        # For DOCX files, extract text
+                        async with aiofiles.open(file_path, 'rb') as f:
+                            file_content = await f.read()
+                        return self.extract_text_from_file(file_content, FileType.DOCX)
+                    else:
+                        raise ValidationException(f"Unsupported file type: {file_extension}")
+            return None
+            
+        except Exception as e:
+            raise FileUploadException(f"Failed to get text content: {str(e)}")
+
+    async def get_pdf_file(self, file_id: str) -> Optional[Tuple[bytes, str]]:
+        """Get the original PDF file by file ID"""
+        try:
+            for file_path in self.upload_folder.iterdir():
+                if file_path.name.startswith(file_id) and file_path.suffix.lower() == '.pdf':
+                    async with aiofiles.open(file_path, 'rb') as f:
+                        file_content = await f.read()
+                    return file_content, file_path.name
+            return None
+            
+        except Exception as e:
+            raise FileUploadException(f"Failed to get PDF file: {str(e)}")
+    
+    async def get_txt_file(self, file_id: str) -> Optional[Tuple[str, str]]:
+        """Get the extracted TXT file by file ID"""
+        try:
+            for file_path in self.upload_folder.iterdir():
+                if file_path.name.startswith(file_id) and file_path.suffix.lower() == '.txt':
+                    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                        text_content = await f.read()
+                    return text_content, file_path.name
+            return None
+            
+        except Exception as e:
+            raise FileUploadException(f"Failed to get TXT file: {str(e)}")
+    
+    def get_file_info_both(self, file_id: str) -> Optional[dict]:
+        """Get information about both PDF and TXT files by file ID"""
+        try:
+            pdf_info = None
+            txt_info = None
+            
+            for file_path in self.upload_folder.iterdir():
+                if file_path.name.startswith(file_id):
+                    stat = file_path.stat()
+                    file_info = {
+                        "filename": file_path.name,
+                        "size": stat.st_size,
+                        "created": datetime.fromtimestamp(stat.st_ctime),
+                        "modified": datetime.fromtimestamp(stat.st_mtime)
+                    }
+                    
+                    if file_path.suffix.lower() == '.pdf':
+                        pdf_info = file_info
+                    elif file_path.suffix.lower() == '.txt':
+                        txt_info = file_info
+            
+            if pdf_info or txt_info:
+                return {
+                    "file_id": file_id,
+                    "pdf_file": pdf_info,
+                    "txt_file": txt_info
+                }
+            return None
+            
+        except Exception as e:
+            raise FileUploadException(f"Failed to get file info: {str(e)}")
 
 # Factory function for creating document service instances
 def create_document_service(use_docling: bool = True) -> DocumentService:
