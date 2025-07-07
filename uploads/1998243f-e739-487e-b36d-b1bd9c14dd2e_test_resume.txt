@@ -1,4 +1,0 @@
-John Doe
-Software Engineer
-Python, FastAPI, Machine Learning
-5 years experience
